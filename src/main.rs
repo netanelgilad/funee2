@@ -798,6 +798,13 @@ fn op_processKill(process_id: u32, #[string] signal: &str) -> Result<(), JsError
     Ok(())
 }
 
+/// Host function: read process environment variable by name
+#[op2]
+#[string]
+fn op_processEnv(#[string] name: &str) -> String {
+    std::env::var(name).unwrap_or_default()
+}
+
 /// Convert signal number to name
 #[cfg(unix)]
 fn signal_name(signal: i32) -> String {
@@ -1508,6 +1515,13 @@ fn main() -> Result<(), AnyError> {
                 uri: "funee:internal".to_string(),
             },
             op_processKill(),
+        ),
+        (
+            FuneeIdentifier {
+                name: "processEnv".to_string(),
+                uri: "funee:internal".to_string(),
+            },
+            op_processEnv(),
         ),
     ]);
     

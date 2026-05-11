@@ -80,6 +80,41 @@ const TIMER_BOOTSTRAP: &str = r#"
 })();
 "#;
 
+const TEXT_BOOTSTRAP: &str = r#"
+(() => {
+    if (globalThis.TextDecoder) {
+        return;
+    }
+
+    globalThis.TextDecoder = class TextDecoder {
+        decode(bytes = new Uint8Array()) {
+            let result = "";
+            for (let i = 0; i < bytes.length; i++) {
+                const b1 = bytes[i];
+                if (b1 < 0x80) {
+                    result += String.fromCharCode(b1);
+                } else if ((b1 & 0xE0) === 0xC0) {
+                    const b2 = bytes[++i];
+                    result += String.fromCharCode(((b1 & 0x1F) << 6) | (b2 & 0x3F));
+                } else if ((b1 & 0xF0) === 0xE0) {
+                    const b2 = bytes[++i];
+                    const b3 = bytes[++i];
+                    result += String.fromCharCode(((b1 & 0x0F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F));
+                } else {
+                    const b2 = bytes[++i];
+                    const b3 = bytes[++i];
+                    const b4 = bytes[++i];
+                    let codePoint = ((b1 & 0x07) << 18) | ((b2 & 0x3F) << 12) | ((b3 & 0x3F) << 6) | (b4 & 0x3F);
+                    codePoint -= 0x10000;
+                    result += String.fromCharCode(0xD800 + (codePoint >> 10), 0xDC00 + (codePoint & 0x3FF));
+                }
+            }
+            return result;
+        }
+    };
+})();
+"#;
+
 /// Bootstrap JavaScript that sets up web-standard fetch API (Headers, Response, fetch)
 const FETCH_BOOTSTRAP: &str = r#"
 (() => {
@@ -909,6 +944,13 @@ const SUBPROCESS_BOOTSTRAP: &str = r#"
         const result = JSON.parse(resultJson);
         const processId = result.process_id;
         const pid = result.pid;
+
+        const stdoutBase64Promise = options.stdout === "piped"
+            ? ops.op_processReadStdout(processId)
+            : Promise.resolve("");
+        const stderrBase64Promise = options.stderr === "piped"
+            ? ops.op_processReadStderr(processId)
+            : Promise.resolve("");
         
         let stdinClosed = false;
         let statusPromise = null;
@@ -938,16 +980,17 @@ const SUBPROCESS_BOOTSTRAP: &str = r#"
             kill(signal = "SIGTERM") {
                 ops.op_processKill(processId, signal);
             },
+
+            async completion() {
+                const status = await getStatus();
+                return {
+                    status: status.code ?? 0,
+                    signal: status.signal,
+                };
+            },
             
             async output() {
-                const stdoutPromise = options.stdout === "piped" 
-                    ? ops.op_processReadStdout(processId) 
-                    : Promise.resolve("");
-                const stderrPromise = options.stderr === "piped" 
-                    ? ops.op_processReadStderr(processId) 
-                    : Promise.resolve("");
-                
-                const [stdoutBase64, stderrBase64] = await Promise.all([stdoutPromise, stderrPromise]);
+                const [stdoutBase64, stderrBase64] = await Promise.all([stdoutBase64Promise, stderrBase64Promise]);
                 
                 const status = await getStatus();
                 
@@ -977,6 +1020,35 @@ const SUBPROCESS_BOOTSTRAP: &str = r#"
                 ops.op_processCloseStdin(processId);
                 stdinClosed = true;
             },
+
+            async [Symbol.asyncDispose]() {
+                try {
+                    ops.op_processKill(processId, "SIGTERM");
+                } catch {
+                    // Process may already be exited.
+                }
+                await getStatus();
+            },
+        };
+
+        process.stdout = {
+            async *[Symbol.asyncIterator]() {
+                const stdoutBase64 = await stdoutBase64Promise;
+                const stdout = stdoutBase64 ? base64Decode(stdoutBase64) : new Uint8Array(0);
+                if (stdout.length > 0) {
+                    yield stdout;
+                }
+            }
+        };
+
+        process.stderr = {
+            async *[Symbol.asyncIterator]() {
+                const stderrBase64 = await stderrBase64Promise;
+                const stderr = stderrBase64 ? base64Decode(stderrBase64) : new Uint8Array(0);
+                if (stderr.length > 0) {
+                    yield stderr;
+                }
+            }
         };
         
         // For simple form, return Promise<CommandOutput>
@@ -986,6 +1058,12 @@ const SUBPROCESS_BOOTSTRAP: &str = r#"
         
         // For options form, return Process handle
         return process;
+    };
+
+    globalThis.env = (name) => {
+        const ops = Deno.core.ops;
+        const value = ops.op_processEnv(name);
+        return value === "" ? undefined : value;
     };
 })();
 "#;
@@ -1003,6 +1081,8 @@ pub async fn run_js(js: &str, ops: Vec<OpDecl>) -> Result<(), AnyError> {
 
     // Execute timer bootstrap first to set up setTimeout/setInterval globals
     js_runtime.execute_script("[funee:timers.js]", TIMER_BOOTSTRAP)?;
+
+    js_runtime.execute_script("[funee:text.js]", TEXT_BOOTSTRAP)?;
     
     // Execute fetch bootstrap to set up fetch/Headers/Response globals
     js_runtime.execute_script("[funee:fetch.js]", FETCH_BOOTSTRAP)?;

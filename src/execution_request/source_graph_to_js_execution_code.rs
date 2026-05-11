@@ -13,11 +13,11 @@ use petgraph::{
 };
 use std::collections::HashMap;
 use swc_common::{Mark, GLOBALS};
-use swc_ecma_ast::{CallExpr, Callee, Expr, Module, ModuleItem};
+use swc_ecma_ast::{CallExpr, Callee, EsVersion, Expr, Module, ModuleItem};
 use swc_ecma_codegen::{text_writer::JsWriter, Emitter};
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
 use swc_ecma_transforms_base::resolver;
-use swc_ecma_visit::VisitMutWith;
+use swc_ecma_visit::{VisitMut, VisitMutWith};
 
 impl SourceGraph {
     pub fn into_js_execution_code(mut self) -> String {
@@ -112,82 +112,115 @@ impl SourceGraph {
         let mut runtime = MacroRuntime::new();
         
         for nx in nodes {
-            let declaration = self.graph[nx].1.clone();
-            
-            // Check if this is a VarInit that might be a macro call
-            if let Declaration::VarInit(expr) = declaration {
-                if let Expr::Call(call_expr) = expr {
-                    // Check if the callee is an identifier
-                    if let Callee::Expr(callee_expr) = &call_expr.callee {
-                        if let Expr::Ident(ident) = callee_expr.as_ref() {
-                            let callee_name = ident.sym.to_string();
-                            
-                            // Look up what this identifier refers to via edges
-                            if let Some(target_node) = edge_targets.get(&(nx, callee_name.clone())) {
-                                // Check if the target is a macro
-                                if matches!(&self.graph[*target_node].1, Declaration::Macro(_)) {
-                                    // This is a macro call! Expand it
-                                    if let Some((result_expr, macro_refs)) = self.execute_macro_call(
-                                        nx,
-                                        *target_node,
-                                        &call_expr,
-                                        &edge_targets,
-                                        &all_macros,
-                                        &mut runtime,
-                                    ) {
-                                        // Process references from the macro result
-                                        // These are dependencies the macro introduced - find existing nodes for them
-                                        for (local_name, (uri, export_name)) in macro_refs.iter() {
-                                            // Look for an existing node that provides this export
-                                            // It might be under any edge name, so check all edges
-                                            let mut found_target: Option<NodeIndex> = None;
-                                            
-                                            // Search through all edges to find one that points to a node
-                                            // that resolves to this canonical identifier
-                                            for ((_src, _edge_name), tgt) in edge_targets.iter() {
-                                                let (node_uri, _decl) = &self.graph[*tgt];
-                                                // Check if this node's URI matches our reference
-                                                // (simplified check - in practice we'd need to resolve funee specifier)
-                                                if node_uri.ends_with("funee-lib/index.ts") || 
-                                                   node_uri.ends_with("funee-lib/core.ts") ||
-                                                   node_uri == "funee" {
-                                                    // Check if this edge is for our export name
-                                                    found_target = Some(*tgt);
-                                                    break;
-                                                }
-                                            }
-                                            
-                                            if let Some(target_node) = found_target {
-                                                // Add edge from our node to the existing definition
-                                                self.graph.add_edge(nx, target_node, local_name.clone());
-                                            }
-                                        }
-                                        
-                                        // Add edges for identifiers in the result expression
-                                        // so they get renamed correctly during emission
-                                        let result_idents = self.extract_identifiers(&result_expr);
-                                        for ident_name in result_idents {
-                                            // Find if any node in the graph is referenced by this name
-                                            // Check all existing edges to find what this name resolves to
-                                            for ((_src, edge_name), tgt) in edge_targets.iter() {
-                                                if edge_name == &ident_name {
-                                                    // Found a node with this name - add edge from our node
-                                                    self.graph.add_edge(nx, *tgt, ident_name.clone());
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        
-                                        // Replace the VarInit with the result
-                                        self.graph[nx].1 = Declaration::VarInit(result_expr);
-                                    }
-                                }
-                            }
+            let mut declaration = self.graph[nx].1.clone();
+
+            match &mut declaration {
+                Declaration::VarInit(expr) | Declaration::Expr(expr) => {
+                    self.expand_macro_calls_in_expr(
+                        nx,
+                        expr,
+                        &edge_targets,
+                        &all_macros,
+                        &mut runtime,
+                    );
+                    self.graph[nx].1 = declaration;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn expand_macro_calls_in_expr(
+        &mut self,
+        source_node: NodeIndex,
+        expr: &mut Expr,
+        edge_targets: &HashMap<(NodeIndex, String), NodeIndex>,
+        all_macros: &[(String, String)],
+        runtime: &mut MacroRuntime,
+    ) {
+        struct MacroCallExpander<'a> {
+            graph: &'a mut SourceGraph,
+            source_node: NodeIndex,
+            edge_targets: &'a HashMap<(NodeIndex, String), NodeIndex>,
+            all_macros: &'a [(String, String)],
+            runtime: &'a mut MacroRuntime,
+        }
+
+        impl VisitMut for MacroCallExpander<'_> {
+            fn visit_mut_expr(&mut self, expr: &mut Expr) {
+                expr.visit_mut_children_with(self);
+
+                let Expr::Call(call_expr) = expr else {
+                    return;
+                };
+
+                let Callee::Expr(callee_expr) = &call_expr.callee else {
+                    return;
+                };
+
+                let Expr::Ident(ident) = callee_expr.as_ref() else {
+                    return;
+                };
+
+                let callee_name = ident.sym.to_string();
+                let Some(target_node) = self.edge_targets.get(&(self.source_node, callee_name)) else {
+                    return;
+                };
+
+                if !matches!(&self.graph.graph[*target_node].1, Declaration::Macro(_)) {
+                    return;
+                }
+
+                let Some((result_expr, macro_refs)) = self.graph.execute_macro_call(
+                    self.source_node,
+                    *target_node,
+                    call_expr,
+                    self.edge_targets,
+                    self.all_macros,
+                    self.runtime,
+                ) else {
+                    return;
+                };
+
+                for (local_name, (_uri, _export_name)) in macro_refs.iter() {
+                    let mut found_target: Option<NodeIndex> = None;
+                    for ((_src, _edge_name), tgt) in self.edge_targets.iter() {
+                        let (node_uri, _decl) = &self.graph.graph[*tgt];
+                        if node_uri.ends_with("funee-lib/index.ts")
+                            || node_uri.ends_with("funee-lib/core.ts")
+                            || node_uri == "funee"
+                        {
+                            found_target = Some(*tgt);
+                            break;
+                        }
+                    }
+
+                    if let Some(target_node) = found_target {
+                        self.graph.graph.add_edge(self.source_node, target_node, local_name.clone());
+                    }
+                }
+
+                let result_idents = self.graph.extract_identifiers(&result_expr);
+                for ident_name in result_idents {
+                    for ((_src, edge_name), tgt) in self.edge_targets.iter() {
+                        if edge_name == &ident_name {
+                            self.graph.graph.add_edge(self.source_node, *tgt, ident_name.clone());
+                            break;
                         }
                     }
                 }
+
+                *expr = result_expr;
             }
         }
+
+        expr.visit_mut_with(&mut MacroCallExpander {
+            graph: self,
+            source_node,
+            edge_targets,
+            all_macros,
+            runtime,
+        });
     }
 
     /// Execute a macro call and return the result expression plus any new references
@@ -344,7 +377,7 @@ impl SourceGraph {
         
         let lexer = Lexer::new(
             Syntax::Typescript(TsSyntax::default()),
-            Default::default(),
+            EsVersion::latest(),
             StringInput::from(&*fm),
             None,
         );
@@ -413,7 +446,8 @@ fn get_host_module_code(namespace: &str) -> &'static str {
 })"#,
 
         "process" => r#"({
-    spawn: globalThis.spawn
+    spawn: globalThis.spawn,
+    env: globalThis.env
 })"#,
 
         "time" => r#"({

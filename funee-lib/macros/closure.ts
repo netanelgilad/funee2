@@ -26,30 +26,6 @@ export const closure = createMacro(<T>(nodeClosure: Closure<T>): Closure<Closure
   // We need to determine the AST type from the code
   const code = String(nodeClosure.expression).trim();
   
-  // Infer the expression type from the code
-  let exprType = "Expression";
-  if (code.includes("=>")) {
-    exprType = "ArrowFunctionExpression";
-  } else if (code.startsWith("function")) {
-    exprType = "FunctionExpression";
-  } else if (code.startsWith("(") && code.includes("=>")) {
-    exprType = "ArrowFunctionExpression";
-  } else if (code.startsWith("{")) {
-    exprType = "ObjectExpression";
-  } else if (code.startsWith("[")) {
-    exprType = "ArrayExpression";
-  } else if (/^[\d.]/.test(code)) {
-    exprType = "NumericLiteral";
-  } else if (code.startsWith('"') || code.startsWith("'") || code.startsWith("`")) {
-    exprType = "StringLiteral";
-  } else if (code === "true" || code === "false") {
-    exprType = "BooleanLiteral";
-  } else if (code === "null") {
-    exprType = "NullLiteral";
-  } else if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(code)) {
-    exprType = "Identifier";
-  }
-
   // Build the references array entries as code
   const refsEntries = Array.from(nodeClosure.references.entries()).map(
     ([localName, canonicalName]) => 
@@ -60,10 +36,37 @@ export const closure = createMacro(<T>(nodeClosure: Closure<T>): Closure<Closure
     ? `new Map([${refsEntries.join(", ")}])`
     : "new Map()";
 
-  // Build: ({ expression: { type, code }, references: ... })
-  // Return a plain object - no Closure wrapper needed
-  // The expression is an AST-like object with type and the original code
-  const resultCode = `({ expression: { type: ${JSON.stringify(exprType)}, code: ${JSON.stringify(code)} }, references: ${refsCode} })`;
+  let escapedCode = "";
+  let quote: string | undefined;
+  let escaped = false;
+  for (const ch of code) {
+    if (escaped) {
+      escapedCode += ch;
+      escaped = false;
+    } else if (ch === "\\") {
+      escapedCode += ch;
+      escaped = true;
+    } else if (quote) {
+      if (ch === quote) {
+        quote = undefined;
+        escapedCode += ch;
+      } else if (ch === "\n") {
+        escapedCode += "\\n";
+      } else if (ch === "\r") {
+        escapedCode += "\\r";
+      } else {
+        escapedCode += ch;
+      }
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+      escapedCode += ch;
+    } else {
+      escapedCode += ch;
+    }
+  }
+
+  // Build a runtime Closure object. Validator scenarios execute expression directly.
+  const resultCode = `({ expression: ${escapedCode}, references: ${refsCode} })`;
 
   return {
     expression: resultCode,
