@@ -89,9 +89,10 @@ export const runScenarios = async (
     } catch (err) {
       logger(`❌  ${scenario.description}`);
       logger("");
-      logger(String(err));
       if (err instanceof Error && err.stack) {
         logger(err.stack);
+      } else {
+        logger(String(err));
       }
       logger("");
       results.push({

@@ -1,3 +1,5 @@
+/// <reference path="../../funee-lib/host/index.d.ts" />
+
 /**
  * Self-hosted HTTP tests
  * 
@@ -8,21 +10,44 @@
  * 
  * Uses the scenario/runScenarios pattern for test organization.
  */
+import { log } from "host://console";
+import { serve } from "host://http/server";
+import { spawn } from "host://process";
+import type { Closure } from "../../funee-lib/core.ts";
+import { scenario, runScenarios } from "../../funee-lib/validator/index.ts";
+import { closure } from "../../funee-lib/macros/closure.ts";
 import {
-  log,
-  scenario,
-  runScenarios,
-  Closure,
   assertThat,
-  is,
-  serve,
+  eventually,
   greaterThan,
-  contains,
-} from "funee";
+  is,
+} from "../../funee-lib/assertions/index.ts";
+import { FUNEE_SUT_BIN } from "./_sut.ts";
+
+const FUNEE = FUNEE_SUT_BIN;
 
 // ==================== HTTP SERVER SCENARIOS ====================
 
 const httpServerScenarios = [
+  scenario({
+    description: "http server :: spawned JSON health server responds",
+    verify: closure(async () => {
+      const port = 18988;
+
+      await using _server = spawn({
+        cmd: [FUNEE, "tests/fixtures/gateway/json-health-server.ts"],
+        env: {
+          GATEWAY_PORT: String(port),
+        },
+      });
+
+      const isServerHealthy = async () =>
+        (await fetch(`http://127.0.0.1:${port}/healthz`)).status === 200;
+
+      await assertThat(isServerHealthy, eventually(is(true)));
+    }),
+  }),
+
   // Basic server functionality
   scenario({
     description: "http server :: responds to GET",

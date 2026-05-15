@@ -35,6 +35,8 @@ export { assertThat } from "./assertThat.ts";
 export { is } from "./is.ts";
 export { not } from "./not.ts";
 export { both } from "./both.ts";
+export type { EventuallyOptions } from "./eventually.ts";
+export { eventually } from "./eventually.ts";
 
 // Matchers
 export { contains } from "./contains.ts";

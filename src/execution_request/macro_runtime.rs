@@ -108,6 +108,7 @@ impl MacroRuntime {
         // Execute the macro and send result back via op
         let code = format!(
             r#"
+            (() => {{
             // Track macro call count for infinite loop detection
             let __macro_call_count = 0;
             const __max_iterations = {max_iterations};
@@ -134,6 +135,7 @@ impl MacroRuntime {
                 references: Object.fromEntries(__macro_result.references || new Map())
             }});
             Deno.core.ops.op_set_macro_result(__result_json);
+            }})();
             "#
         );
 
