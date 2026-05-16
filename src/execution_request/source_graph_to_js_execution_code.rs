@@ -262,7 +262,13 @@ impl SourceGraph {
             .enumerate()
             .map(|(arg_idx, arg)| {
                 // Look for a ClosureValue node that was created for this argument
-                let closure_edge_name = format!("{}_arg{}", macro_name, arg_idx);
+                let closure_edge_name = format!(
+                    "{}_{}:{}_arg{}",
+                    macro_name,
+                    call_expr.span.lo.0,
+                    call_expr.span.hi.0,
+                    arg_idx,
+                );
                 let references = if let Some(closure_node) = edge_targets.get(&(source_node, closure_edge_name)) {
                     // Found the ClosureValue node - get its references
                     if let Declaration::ClosureValue(closure) = &self.graph[*closure_node].1 {
@@ -426,6 +432,7 @@ fn get_host_module_code(namespace: &str) -> &'static str {
     readFile: (path) => Deno.core.ops.op_fsReadFile(path),
     readFileBinary: (path) => Deno.core.ops.op_fsReadFileBinary(path),
     writeFile: (path, content) => Deno.core.ops.op_fsWriteFile(path, content),
+    removeFile: (path) => Deno.core.ops.op_fsRemoveFile(path),
     writeFileBinary: (path, contentBase64) => Deno.core.ops.op_fsWriteFileBinary(path, contentBase64),
     isFile: (path) => Deno.core.ops.op_fsIsFile(path),
     exists: (path) => Deno.core.ops.op_fsExists(path),

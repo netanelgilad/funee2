@@ -154,6 +154,18 @@ fn op_fsWriteFile(#[string] path: &str, #[string] content: &str) -> String {
     serde_json::to_string(&result).unwrap_or_else(|e| format!(r#"{{"type":"error","error":"{}"}}"#, e))
 }
 
+/// Host function: remove a file
+/// Returns JSON: { type: "ok", value: null } or { type: "error", error: "message" }
+#[op2]
+#[string]
+fn op_fsRemoveFile(#[string] path: &str) -> String {
+    let result: FsResult<()> = match fs::remove_file(path) {
+        Ok(()) => FsResult::Ok { value: () },
+        Err(e) => FsResult::Err { error: format!("removeFile failed: {}", e) },
+    };
+    serde_json::to_string(&result).unwrap_or_else(|e| format!(r#"{{"type":"error","error":"{}"}}"#, e))
+}
+
 /// Host function: write binary content (base64 encoded) to a file
 /// Returns JSON: { type: "ok", value: null } or { type: "error", error: "message" }
 #[op2]
@@ -1350,6 +1362,13 @@ fn main() -> Result<(), AnyError> {
                 uri: "funee".to_string(),
             },
             op_fsWriteFile(),
+        ),
+        (
+            FuneeIdentifier {
+                name: "fsRemoveFile".to_string(),
+                uri: "funee".to_string(),
+            },
+            op_fsRemoveFile(),
         ),
         (
             FuneeIdentifier {

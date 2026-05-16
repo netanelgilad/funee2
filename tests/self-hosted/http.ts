@@ -12,7 +12,6 @@
  */
 import { log } from "host://console";
 import { serve } from "host://http/server";
-import { spawn } from "host://process";
 import type { Closure } from "../../funee-lib/core.ts";
 import { scenario, runScenarios } from "../../funee-lib/validator/index.ts";
 import { closure } from "../../funee-lib/macros/closure.ts";
@@ -22,9 +21,7 @@ import {
   greaterThan,
   is,
 } from "../../funee-lib/assertions/index.ts";
-import { FUNEE_SUT_BIN } from "./_sut.ts";
-
-const FUNEE = FUNEE_SUT_BIN;
+import { spawnFuneeSUT } from "./_sut.ts";
 
 // ==================== HTTP SERVER SCENARIOS ====================
 
@@ -34,8 +31,8 @@ const httpServerScenarios = [
     verify: closure(async () => {
       const port = 18988;
 
-      await using _server = spawn({
-        cmd: [FUNEE, "tests/fixtures/gateway/json-health-server.ts"],
+      await using _server = await spawnFuneeSUT({
+        entrypoint: "tests/fixtures/gateway/json-health-server.ts",
         env: {
           GATEWAY_PORT: String(port),
         },

@@ -29,6 +29,7 @@ export interface Closure<T> {
    * At bundle time, this is the actual SWC/Babel AST node.
    */
   expression: any;  // AST node (type depends on AST library used)
+  code?: string;
   
   /**
    * Map of external references used in the expression.

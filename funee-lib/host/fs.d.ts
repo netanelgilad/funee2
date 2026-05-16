@@ -41,6 +41,12 @@ export declare function readFileBinary(path: string): string;
 export declare function writeFile(path: string, content: string): string;
 
 /**
+ * Remove a file.
+ * @returns JSON string with result format
+ */
+export declare function removeFile(path: string): string;
+
+/**
  * Write binary data to a file (base64 encoded)
  * @returns JSON string with result format
  */

@@ -27,6 +27,7 @@ declare module "host://fs" {
   export function readFile(path: string): string;
   export function readFileBinary(path: string): string;
   export function writeFile(path: string, content: string): string;
+  export function removeFile(path: string): string;
   export function writeFileBinary(path: string, contentBase64: string): string;
   export function isFile(path: string): boolean;
   export function exists(path: string): boolean;

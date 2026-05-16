@@ -65,11 +65,17 @@ export const closure = createMacro(<T>(nodeClosure: Closure<T>): Closure<Closure
     }
   }
 
-  // Build a runtime Closure object. Validator scenarios execute expression directly.
-  const resultCode = `({ expression: ${escapedCode}, references: ${refsCode} })`;
+  const expressionCode = code.includes("=>") || code.startsWith("function") ||
+      code.startsWith("async function")
+    ? `Object.assign(${escapedCode}, { type: "ArrowFunctionExpression" })`
+    : escapedCode;
+
+  // Build a runtime Closure object. Validator scenarios execute expression directly,
+  // while fixtures use `code` to write the original source into generated modules.
+  const resultCode = `({ expression: ${expressionCode}, code: ${JSON.stringify(code)}, references: ${refsCode} })`;
 
   return {
     expression: resultCode,
-    references: new Map<string, CanonicalName>(),  // No external references needed
+    references: new Map<string, CanonicalName>(),
   };
 });

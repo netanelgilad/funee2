@@ -1,6 +1,5 @@
 /// <reference path="../../funee-lib/host/process.d.ts" />
 
-import { spawn } from "host://process";
 import {
   scenario,
   runScenarios,
@@ -13,9 +12,7 @@ import {
   otherwise,
 } from "../../funee-lib/assertions/index.ts";
 import { buffer } from "../../funee-lib/streams/buffer.ts";
-import { FUNEE_SUT_BIN } from "./_sut.ts";
-
-const FUNEE = FUNEE_SUT_BIN;
+import { spawnFuneeSUT } from "./_sut.ts";
 
 const scenarios = [
   scenario({
@@ -23,8 +20,8 @@ const scenarios = [
     verify: closure(async () => {
       const port = 18987;
 
-      await using gateway = spawn({
-        cmd: [FUNEE, "tests/fixtures/gateway/ai-gateway-v0.ts"],
+      await using gateway = await spawnFuneeSUT({
+        entrypoint: "tests/fixtures/gateway/ai-gateway-v0.ts",
         env: {
           GATEWAY_PORT: String(port),
           GATEWAY_TOKEN: "test-gateway-token",
@@ -85,13 +82,9 @@ const scenarios = [
     verify: closure(async () => {
       const port = 18988;
 
-      await using gateway = spawn({
-        cmd: [
-          FUNEE,
-          "--replacements",
-          "tests/fixtures/gateway/http-upstream-fixture.ts",
-          "tests/fixtures/gateway/ai-gateway-v0.ts",
-        ],
+      await using gateway = await spawnFuneeSUT({
+        entrypoint: "tests/fixtures/gateway/ai-gateway-v0.ts",
+        inMemoryHost: "tests/fixtures/gateway/http-upstream-fixture.ts",
         env: {
           GATEWAY_PORT: String(port),
           GATEWAY_TOKEN: "test-gateway-token",

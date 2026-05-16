@@ -9,6 +9,8 @@ use swc_ecma_visit::{noop_visit_type, Visit, VisitWith};
 pub struct MacroCall {
     /// The name of the macro function being called (local name in current scope)
     pub macro_name: String,
+    /// Stable identifier for this call site within its source file.
+    pub call_id: String,
     /// The arguments passed to the macro
     pub arguments: Vec<Expr>,
 }
@@ -44,6 +46,7 @@ impl<'a> Visit for MacroCallFinder<'a> {
                         
                         self.macro_calls.push(MacroCall {
                             macro_name: name.to_string(),
+                            call_id: format!("{}:{}", call.span.lo.0, call.span.hi.0),
                             arguments,
                         });
                     }

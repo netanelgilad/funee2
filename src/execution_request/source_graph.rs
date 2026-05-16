@@ -748,6 +748,24 @@ impl SourceGraph {
                     );
                 }
 
+                if !is_host_uri(&source_uri) {
+                    let module = load_module(&self.source_map, source_uri.clone().into());
+                    for (local_name, declaration) in get_module_declarations(module) {
+                        let Declaration::FuneeIdentifier(identifier) = declaration.declaration else {
+                            continue;
+                        };
+
+                        current_scope_refs.entry(local_name).or_insert_with(|| FuneeIdentifier {
+                            name: identifier.name,
+                            uri: resolve_import_uri(
+                                &identifier.uri,
+                                &source_uri,
+                                &self.funee_lib_path,
+                            ),
+                        });
+                    }
+                }
+
                 // Find all macro calls in this expression
                 let macro_calls = find_macro_calls(&expr, &self.macro_functions, &current_scope_refs);
 
@@ -761,7 +779,12 @@ impl SourceGraph {
                         );
 
                         // Create a unique name for this closure argument
-                        let closure_name = format!("{}_arg{}", macro_call.macro_name, arg_idx);
+                        let closure_name = format!(
+                            "{}_{}_arg{}",
+                            macro_call.macro_name,
+                            macro_call.call_id,
+                            arg_idx,
+                        );
                         let closure_identifier = FuneeIdentifier {
                             name: closure_name.clone(),
                             uri: source_uri.clone(),

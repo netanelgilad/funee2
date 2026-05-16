@@ -27,9 +27,7 @@ import {
   watchFile,
   watchDirectory,
 } from "funee";
-import { FUNEE_SUT_BIN } from "./_sut.ts";
-
-const FUNEE = FUNEE_SUT_BIN;
+import { runFuneeSUT } from "./_sut.ts";
 
 // ============================================================================
 // SUBPROCESS SCENARIOS
@@ -379,7 +377,7 @@ const macroScenarios = [
       "macro :: [SPEC-MACRO-EXPANSION-001] closure macro expands to AST at compile time",
     verify: {
       expression: async () => {
-        const result = await spawn(FUNEE, [
+        const result = await runFuneeSUT([
           "tests/fixtures/macro/closure-macro.ts",
         ]);
         await assertThat(result.status.code, is(0));
@@ -396,7 +394,7 @@ const macroScenarios = [
       "macro :: [SPEC-MACRO-REFERENCES-001] closure captures cross-file references",
     verify: {
       expression: async () => {
-        const result = await spawn(FUNEE, [
+        const result = await runFuneeSUT([
           "tests/fixtures/macro/cross-file-ref/entry.ts",
         ]);
         await assertThat(result.status.code, is(0));
@@ -412,13 +410,13 @@ const macroScenarios = [
       "macro :: [SPEC-MACRO-EXEC-001] conditional macro branches on expression shape",
     verify: {
       expression: async () => {
-        const first = await spawn(FUNEE, [
+        const first = await runFuneeSUT([
           "tests/fixtures/macro/conditional_macro.ts",
         ]);
         await assertThat(first.status.code, is(0));
         await assertThat(first.stdoutText(), contains("conditional:result=10"));
 
-        const second = await spawn(FUNEE, [
+        const second = await runFuneeSUT([
           "tests/fixtures/macro/conditional_macro_already_multiplied.ts",
         ]);
         await assertThat(second.status.code, is(0));
@@ -437,7 +435,7 @@ const macroScenarios = [
       "macro :: [SPEC-MACRO-EXEC-002] macro can inspect arg.expression",
     verify: {
       expression: async () => {
-        const result = await spawn(FUNEE, [
+        const result = await runFuneeSUT([
           "tests/fixtures/macro/introspection_macro.ts",
         ]);
         await assertThat(result.status.code, is(0));
@@ -456,7 +454,7 @@ const macroScenarios = [
       "macro :: [SPEC-MACRO-EXEC-003] two-argument macro receives both Closure arguments",
     verify: {
       expression: async () => {
-        const result = await spawn(FUNEE, [
+        const result = await runFuneeSUT([
           "tests/fixtures/macro/multi_arg_compare.ts",
         ]);
         await assertThat(result.status.code, is(0));
@@ -472,7 +470,7 @@ const macroScenarios = [
       "macro :: [SPEC-MACRO-EXEC-004] variadic macros receive all arguments",
     verify: {
       expression: async () => {
-        const result = await spawn(FUNEE, [
+        const result = await runFuneeSUT([
           "tests/fixtures/macro/variadic_numeric_count.ts",
         ]);
         await assertThat(result.status.code, is(0));
@@ -488,7 +486,7 @@ const macroScenarios = [
       "macro :: [SPEC-MACRO-REFERENCES-002] macro can inspect arg.references",
     verify: {
       expression: async () => {
-        const result = await spawn(FUNEE, [
+        const result = await runFuneeSUT([
           "tests/fixtures/macro/references_introspection.ts",
         ]);
         await assertThat(result.status.code, is(0));
@@ -507,21 +505,21 @@ const macroScenarios = [
       "macro :: [SPEC-MACRO-EXEC-005] macro output can construct object/array/member expressions",
     verify: {
       expression: async () => {
-        const objectResult = await spawn(FUNEE, [
+        const objectResult = await runFuneeSUT([
           "tests/fixtures/macro/object_macro.ts",
         ]);
         await assertThat(objectResult.status.code, is(0));
         await assertThat(objectResult.stdoutText(), contains("object:name=test"));
         await assertThat(objectResult.stdoutText(), contains("object:value=42"));
 
-        const arrayResult = await spawn(FUNEE, [
+        const arrayResult = await runFuneeSUT([
           "tests/fixtures/macro/array_macro.ts",
         ]);
         await assertThat(arrayResult.status.code, is(0));
         await assertThat(arrayResult.stdoutText(), contains("array:first=1"));
         await assertThat(arrayResult.stdoutText(), contains("array:third=3"));
 
-        const memberResult = await spawn(FUNEE, [
+        const memberResult = await runFuneeSUT([
           "tests/fixtures/macro/member_macro.ts",
         ]);
         await assertThat(memberResult.status.code, is(0));
@@ -537,7 +535,7 @@ const macroScenarios = [
       "macro :: [SPEC-MACRO-EXEC-006] macro output supports sequence-expression evaluation",
     verify: {
       expression: async () => {
-        const result = await spawn(FUNEE, [
+        const result = await runFuneeSUT([
           "tests/fixtures/macro/debug_sequence_macro.ts",
         ]);
         await assertThat(result.status.code, is(0));
