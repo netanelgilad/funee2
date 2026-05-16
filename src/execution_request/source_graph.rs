@@ -2,11 +2,13 @@ use super::{
     capture_closure::capture_closure,
     declaration::Declaration, 
     detect_macro_calls::find_macro_calls,
+    get_module_declarations::get_module_declarations,
     get_references_from_declaration::get_references_from_declaration,
     load_module_declaration::load_declaration,
 };
-use crate::funee_identifier::FuneeIdentifier;
+use crate::{emit_module::emit_module, funee_identifier::FuneeIdentifier, load_module::load_module};
 use petgraph::{
+    graph::EdgeIndex,
     stable_graph::NodeIndex,
     visit::{Dfs, EdgeRef, VisitMap},
     Graph,
@@ -18,7 +20,8 @@ use std::{
     rc::Rc,
 };
 use swc_common::{FileLoader, FilePathMapping, Globals, Mark, SourceMap, GLOBALS};
-use swc_ecma_ast::Expr;
+use swc_ecma_ast::{ArrayLit, Callee, Expr, ExprOrSpread, Module, ModuleDecl, ModuleItem};
+use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
 use swc_ecma_transforms_base::resolver;
 use swc_ecma_visit::VisitMutWith;
 use url::Url;
@@ -173,6 +176,7 @@ pub struct SourceGraph {
     pub root: NodeIndex,
     pub source_map: Rc<SourceMap>,
     pub references_mark: ReferencesMark,
+    pub funee_lib_path: Option<String>,
     /// Set of FuneeIdentifiers that are macro functions (created via createMacro)
     pub macro_functions: HashSet<FuneeIdentifier>,
 }
@@ -184,6 +188,14 @@ pub struct LoadParams {
     pub file_loader: Box<dyn FileLoader + Sync + Send>,
     /// Path to the funee standard library (funee-lib/index.ts)
     pub funee_lib_path: Option<String>,
+    pub replacement_paths: Vec<String>,
+}
+
+struct GraphReplacement {
+    target: FuneeIdentifier,
+    implementation: Expr,
+    source_uri: String,
+    dependencies: HashMap<String, FuneeIdentifier>,
 }
 
 impl SourceGraph {
@@ -230,8 +242,10 @@ impl SourceGraph {
             };
 
             for reference in references {
-                // Skip JavaScript globals - they're provided by the runtime
-                if is_js_global(&reference.0) {
+                // Skip JavaScript globals unless the current module explicitly imports/declares
+                // that name. Imported host bindings like `host://http` fetch must win over
+                // same-named runtime globals so macros can capture their canonical target.
+                if is_js_global(&reference.0) && load_declaration(&cm, &reference.1).is_none() {
                     continue;
                 }
 
@@ -335,6 +349,7 @@ impl SourceGraph {
                 mark: unresolved_mark,
                 globals,
             },
+            funee_lib_path: params.funee_lib_path,
             root: root_node,
             macro_functions,
         };
@@ -342,8 +357,342 @@ impl SourceGraph {
         // Step 2: Process macro calls now that the graph is fully built
         instance.process_macro_calls(&mut definitions_index, &mut dfs);
 
+        let replacements = params
+            .replacement_paths
+            .iter()
+            .flat_map(|path| instance.load_replacements(path))
+            .collect::<Vec<_>>();
+        instance.apply_replacements(replacements);
+
         instance
     }
+
+    fn load_replacements(&self, replacement_path: &str) -> Vec<GraphReplacement> {
+        let module = load_module(&self.source_map, replacement_path.into());
+        let module_declarations = get_module_declarations(module.clone());
+        let imports = module_declarations
+            .iter()
+            .filter_map(|(local_name, declaration)| match &declaration.declaration {
+                Declaration::FuneeIdentifier(identifier) => Some((
+                    local_name.clone(),
+                    FuneeIdentifier {
+                        name: identifier.name.clone(),
+                        uri: resolve_import_uri(
+                            &identifier.uri,
+                            replacement_path,
+                            &self.funee_lib_path,
+                        ),
+                    },
+                )),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+
+        let mut replacements = Vec::new();
+        for item in module.body {
+            let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(default_expr)) = item else {
+                continue;
+            };
+
+            match *default_expr.expr {
+                Expr::Array(ArrayLit { elems, .. }) => {
+                    for elem in elems.into_iter().flatten() {
+                        if let Some(replacement) = self.replacement_from_expr(
+                            replacement_path,
+                            &imports,
+                            elem,
+                        ) {
+                            replacements.push(replacement);
+                        }
+                    }
+                }
+                Expr::Call(call) => {
+                    if let Some(replacement) = self.in_memory_host_replacement_from_call(
+                        replacement_path,
+                        &imports,
+                        call,
+                    ) {
+                        replacements.push(replacement);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        replacements
+    }
+
+    fn in_memory_host_replacement_from_call(
+        &self,
+        replacement_path: &str,
+        imports: &HashMap<String, FuneeIdentifier>,
+        call: swc_ecma_ast::CallExpr,
+    ) -> Option<GraphReplacement> {
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+
+        if !matches!(callee.as_ref(), Expr::Ident(ident) if ident.sym.as_ref() == "createInMemoryHost") {
+            return None;
+        }
+
+        let config_arg = call.args.first()?;
+        let config_code = self.replacement_expr_to_code(&config_arg.expr);
+        let implementation_code = format!(
+            r#"async (input, init) => {{
+  const __inMemoryHostConfig = {config_code};
+  const __servers = __inMemoryHostConfig.http?.servers ?? [];
+  const request = typeof input === "object" && input && "url" in input
+    ? input
+    : {{ url: String(input), method: init?.method ?? "GET", headers: init?.headers, body: init?.body }};
+  const requestOrigin = new URL(request.url).origin;
+  const server = __servers.find((server) => server.origin === requestOrigin);
+
+  if (!server) {{
+    return new Response(`No in-memory HTTP server for ${{requestOrigin}}`, {{ status: 502 }});
+  }}
+
+  return await server.handler(request);
+}}"#,
+        );
+        let implementation = self.parse_replacement_expr(&implementation_code)?;
+
+        let mut implementation_for_refs = implementation.clone();
+        GLOBALS.set(&self.references_mark.globals, || {
+            let resolver_pass = &mut resolver(self.references_mark.mark, Mark::new(), true);
+            implementation_for_refs.visit_mut_with(resolver_pass);
+        });
+
+        let mut implementation_declaration = Declaration::VarInit(implementation_for_refs.clone());
+        let dependency_names = get_references_from_declaration(
+            &mut implementation_declaration,
+            (&self.references_mark.globals, self.references_mark.mark),
+        );
+        let dependencies = dependency_names
+            .into_iter()
+            .filter(|name| !is_js_global(name))
+            .map(|name| {
+                let identifier = imports.get(&name).cloned().unwrap_or_else(|| FuneeIdentifier {
+                    name: name.clone(),
+                    uri: replacement_path.to_string(),
+                });
+                (name, identifier)
+            })
+            .collect();
+
+        Some(GraphReplacement {
+            target: FuneeIdentifier {
+                name: "fetch".to_string(),
+                uri: "host://http".to_string(),
+            },
+            implementation: implementation_for_refs,
+            source_uri: replacement_path.to_string(),
+            dependencies,
+        })
+    }
+
+    fn replacement_from_expr(
+        &self,
+        replacement_path: &str,
+        imports: &HashMap<String, FuneeIdentifier>,
+        elem: ExprOrSpread,
+    ) -> Option<GraphReplacement> {
+        let Expr::Call(call) = *elem.expr else {
+            return None;
+        };
+
+        let Callee::Expr(callee) = &call.callee else {
+            return None;
+        };
+
+        if !matches!(callee.as_ref(), Expr::Ident(ident) if ident.sym.as_ref() == "replacement") {
+            return None;
+        }
+
+        let target_arg = call.args.first()?;
+        let implementation_arg = call.args.get(1)?;
+        let Expr::Ident(target_ident) = target_arg.expr.as_ref() else {
+            return None;
+        };
+        let target = imports.get(target_ident.sym.as_ref())?.clone();
+
+        let mut implementation = (*implementation_arg.expr).clone();
+        GLOBALS.set(&self.references_mark.globals, || {
+            let resolver_pass = &mut resolver(self.references_mark.mark, Mark::new(), true);
+            implementation.visit_mut_with(resolver_pass);
+        });
+
+        let mut implementation_declaration = Declaration::VarInit(implementation.clone());
+        let dependency_names = get_references_from_declaration(
+            &mut implementation_declaration,
+            (&self.references_mark.globals, self.references_mark.mark),
+        );
+        let dependencies = dependency_names
+            .into_iter()
+            .filter(|name| !is_js_global(name))
+            .map(|name| {
+                let identifier = imports.get(&name).cloned().unwrap_or_else(|| FuneeIdentifier {
+                    name: name.clone(),
+                    uri: replacement_path.to_string(),
+                });
+                (name, identifier)
+            })
+            .collect();
+
+        Some(GraphReplacement {
+            target,
+            implementation,
+            source_uri: replacement_path.to_string(),
+            dependencies,
+        })
+    }
+
+    fn apply_replacements(&mut self, replacements: Vec<GraphReplacement>) {
+        for replacement in replacements {
+            let Some(target_node) = self.find_replacement_target(&replacement.target) else {
+                continue;
+            };
+            let replacement_node = self.graph.add_node((
+                replacement.source_uri.clone(),
+                Declaration::VarInit(replacement.implementation),
+            ));
+
+            for (local_name, identifier) in replacement.dependencies {
+                let dependency_node = self.add_replacement_dependency(identifier);
+                self.graph.add_edge(replacement_node, dependency_node, local_name);
+            }
+
+            let edges_to_redirect = self
+                .graph
+                .edge_references()
+                .filter(|edge| edge.target() == target_node)
+                .map(|edge| (edge.id(), edge.source(), edge.weight().clone()))
+                .collect::<Vec<(EdgeIndex, NodeIndex, String)>>();
+
+            for (edge_id, source, weight) in edges_to_redirect {
+                self.graph.remove_edge(edge_id);
+                self.graph.add_edge(source, replacement_node, weight);
+            }
+        }
+    }
+
+    fn find_replacement_target(&self, target: &FuneeIdentifier) -> Option<NodeIndex> {
+        for node in self.graph.node_indices() {
+            let (_, declaration) = &self.graph[node];
+            match declaration {
+                Declaration::HostModule(namespace, export_name)
+                    if target.uri == format!("host://{}", namespace) && target.name == *export_name =>
+                {
+                    return Some(node);
+                }
+                _ => {}
+            }
+        }
+
+        None
+    }
+
+    fn replacement_expr_to_code(&self, expr: &Expr) -> String {
+        let module = Module {
+            body: vec![ModuleItem::Stmt(swc_ecma_ast::Stmt::Expr(
+                swc_ecma_ast::ExprStmt {
+                    span: Default::default(),
+                    expr: Box::new(expr.clone()),
+                },
+            ))],
+            shebang: None,
+            span: Default::default(),
+        };
+        let (_srcmap, buf) = emit_module(self.source_map.clone(), module);
+        String::from_utf8(buf)
+            .expect("failed to convert expression to utf8")
+            .trim()
+            .trim_end_matches(';')
+            .to_string()
+    }
+
+    fn parse_replacement_expr(&self, code: &str) -> Option<Expr> {
+        let fm = self.source_map.new_source_file(
+            swc_common::FileName::Anon.into(),
+            code.to_string(),
+        );
+        let lexer = Lexer::new(
+            Syntax::Typescript(TsSyntax::default()),
+            swc_ecma_ast::EsVersion::latest(),
+            StringInput::from(&*fm),
+            None,
+        );
+        let mut parser = Parser::new_from(lexer);
+        parser.parse_expr().ok().map(|expr| *expr)
+    }
+
+    fn add_replacement_dependency(&mut self, identifier: FuneeIdentifier) -> NodeIndex {
+        let (declaration, resolved_uri) = self.resolve_replacement_dependency(identifier);
+        let dependency_node = self.graph.add_node((resolved_uri.clone(), declaration.clone()));
+
+        let mut dependency_declaration = declaration.clone();
+        let dependencies = get_references_from_declaration(
+            &mut dependency_declaration,
+            (&self.references_mark.globals, self.references_mark.mark),
+        );
+        for local_name in dependencies {
+            if is_js_global(&local_name) {
+                continue;
+            }
+
+            let child_identifier = FuneeIdentifier {
+                name: local_name.clone(),
+                uri: resolved_uri.clone(),
+            };
+            let child_node = self.add_replacement_dependency(child_identifier);
+            self.graph.add_edge(dependency_node, child_node, local_name);
+        }
+
+        dependency_node
+    }
+
+    fn resolve_replacement_dependency(&self, identifier: FuneeIdentifier) -> (Declaration, String) {
+        let mut current_identifier = identifier;
+        loop {
+            if is_host_uri(&current_identifier.uri) {
+                let namespace = current_identifier
+                    .uri
+                    .strip_prefix("host://")
+                    .unwrap()
+                    .to_string();
+                return (
+                    Declaration::HostModule(namespace, current_identifier.name.clone()),
+                    current_identifier.uri,
+                );
+            }
+
+            let declaration = load_declaration(&self.source_map, &current_identifier)
+                .unwrap_or_else(|| {
+                    eprintln!(
+                        "error: Cannot find '{}' in module '{}'",
+                        current_identifier.name, current_identifier.uri,
+                    );
+                    std::process::exit(1);
+                })
+                .declaration;
+
+            if let Declaration::FuneeIdentifier(next_identifier) = declaration {
+                let resolved_uri = resolve_import_uri(
+                    &next_identifier.uri,
+                    &current_identifier.uri,
+                    &self.funee_lib_path,
+                );
+                current_identifier = FuneeIdentifier {
+                    name: next_identifier.name,
+                    uri: resolved_uri,
+                };
+                continue;
+            }
+
+            return (declaration, current_identifier.uri);
+        }
+    }
+
 
     /// Process macro calls in the graph after it's fully constructed
     /// This needs to be a second pass because macros might be defined later in the module tree

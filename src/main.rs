@@ -1234,12 +1234,13 @@ fn main() -> Result<(), AnyError> {
     }
     
     if args.len() < 2 {
-        eprintln!("Usage: funee [--emit] [--reload] [--version] <file.ts>");
+        eprintln!("Usage: funee [--emit] [--reload] [--version] [--replacements <file.ts>] <file.ts>");
         eprintln!("");
         eprintln!("Options:");
         eprintln!("  --emit    Print bundled JavaScript instead of executing");
         eprintln!("  --reload  Bypass HTTP cache and fetch fresh from network");
         eprintln!("  --version Print funee version and exit");
+        eprintln!("  --replacements <file.ts> Load replacement tuples before executing");
         eprintln!("");
         eprintln!("Runs the default export function from the given TypeScript file.");
         std::process::exit(1);
@@ -1248,11 +1249,42 @@ fn main() -> Result<(), AnyError> {
     // Parse args
     let emit_only = args.contains(&"--emit".to_string());
     let force_reload = args.contains(&"--reload".to_string());
-    let file_path = args.iter()
-        .skip(1)
-        .find(|arg| !arg.starts_with("--"))
-        .expect("No file path provided");
-    let absolute_path = if Path::new(file_path).is_absolute() {
+    let mut replacement_paths: Vec<String> = Vec::new();
+    let mut file_path: Option<String> = None;
+    let mut arg_index = 1;
+    while arg_index < args.len() {
+        match args[arg_index].as_str() {
+            "--emit" | "--reload" | "--version" => {
+                arg_index += 1;
+            }
+            "--replacements" => {
+                arg_index += 1;
+                let replacement_path = args
+                    .get(arg_index)
+                    .cloned()
+                    .expect("--replacements requires a file path");
+                replacement_paths.push(if Path::new(&replacement_path).is_absolute() {
+                    replacement_path
+                } else {
+                    env::current_dir()?
+                        .join(replacement_path)
+                        .to_string_lossy()
+                        .to_string()
+                });
+                arg_index += 1;
+            }
+            value if value.starts_with("--") => {
+                eprintln!("Unknown option: {}", value);
+                std::process::exit(1);
+            }
+            value => {
+                file_path = Some(value.to_string());
+                arg_index += 1;
+            }
+        }
+    }
+    let file_path = file_path.expect("No file path provided");
+    let absolute_path = if Path::new(&file_path).is_absolute() {
         file_path.clone()
     } else {
         env::current_dir()?
@@ -1568,6 +1600,7 @@ fn main() -> Result<(), AnyError> {
         scope: absolute_path,
         host_functions,
         funee_lib_path,
+        replacement_paths,
         file_loader: Box::new(http_loader::HttpFileLoader::with_force_reload(force_reload)?),
     };
     
