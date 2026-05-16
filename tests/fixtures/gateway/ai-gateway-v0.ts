@@ -1,6 +1,7 @@
 /// <reference path="./types.d.ts" />
 
 import { serve, createJsonResponse } from "host://http/server";
+import { fetch } from "host://http";
 import { env } from "host://process";
 
 type GatewayErrorBody = {
@@ -37,6 +38,7 @@ function unauthorized(): Response {
 export default async () => {
   const port = Number(env("GATEWAY_PORT") ?? "18987");
   const gatewayToken = env("GATEWAY_TOKEN") ?? "test-gateway-token";
+  const upstreamBaseUrl = env("MOCK_UPSTREAM_BASE_URL");
 
   serve({ port }, async (request) => {
     const url = new URL(request.url);
@@ -52,19 +54,21 @@ export default async () => {
         return unauthorized();
       }
 
-      return json(200, {
-        id: "chatcmpl_gateway_mock",
-        object: "chat.completion",
-        created: Math.floor(Date.now() / 1000),
-        model: "fast",
-        choices: [
-          {
-            index: 0,
-            message: { role: "assistant", content: "ok" },
-            finish_reason: "stop",
+      const upstreamResponse = await fetch(
+        `${upstreamBaseUrl}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": request.headers.get("content-type") ??
+              "application/json",
+            authorization: auth,
           },
-        ],
-      });
+          body: await request.text(),
+        },
+      );
+      const upstreamPayload = await upstreamResponse.json();
+
+      return json(upstreamResponse.status, upstreamPayload);
     }
 
     return json(404, {

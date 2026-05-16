@@ -80,6 +80,72 @@ const scenarios = [
       );
     }),
   }),
+  scenario({
+    description: "gateway :: authenticated chat completion uses in-memory upstream",
+    verify: closure(async () => {
+      const port = 18988;
+
+      await using gateway = spawn({
+        cmd: [
+          FUNEE,
+          "--replacements",
+          "tests/fixtures/gateway/http-upstream-fixture.ts",
+          "tests/fixtures/gateway/ai-gateway-v0.ts",
+        ],
+        env: {
+          GATEWAY_PORT: String(port),
+          GATEWAY_TOKEN: "test-gateway-token",
+          MOCK_UPSTREAM_BASE_URL: "https://upstream.example.test",
+        },
+      });
+      const stdout = buffer(gateway.stdout);
+      const stderr = buffer(gateway.stderr);
+
+      const isServerHealthy = async () =>
+        (await fetch(`http://127.0.0.1:${port}/healthz`)).status === 200;
+
+      await assertThat(
+        isServerHealthy,
+        eventually(is(true)),
+        otherwise(
+          () =>
+            "Gateway process output:\n\nstdout:\n" +
+            stdout.text() +
+            "\n\nstderr:\n" +
+            stderr.text(),
+        ),
+      );
+
+      const response = await fetch(
+        `http://127.0.0.1:${port}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            authorization: "Bearer test-gateway-token",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "fast",
+            messages: [{ role: "user", content: "hello" }],
+          }),
+        },
+      );
+
+      const payload = (await response.json()) as {
+        choices?: Array<{
+          message?: {
+            content?: string;
+          };
+        }>;
+      };
+
+      await assertThat(response.status, is(200));
+      await assertThat(
+        payload.choices?.[0]?.message?.content,
+        is("from in-memory upstream"),
+      );
+    }),
+  }),
 ];
 
 export default async () => {
